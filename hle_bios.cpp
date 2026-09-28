@@ -81,7 +81,55 @@ static void hle_io_setup(int mode_in)
 	Bus::write16(LOOPYIO_44, IO_SETUP_CONSTANT | (uint16_t)mode);
 	Bus::write16(LOOPYIO_30, saved);                        //restore the low byte
 }
+static void hle_fun_1b76_side_effects(uint16_t r4, uint8_t r5)
+{
+	Bus::write16(0x0900002A, r4);
+	Bus::write8(0x09000030, static_cast<uint8_t>(r4 & 0xFF));
+	Bus::write8(0x09000032, r5);
+	ocpm_write16(0x2A, 0x3E80);
+	ocpm_write8(0x25, 0xF8);
+	ocpm_write8(0x24, 0xFA);
+	uint8_t tstr = Bus::read8(OCPM_BASE + 0x00);
+	Bus::write8(OCPM_BASE + 0x00, tstr | 0xE8);
+	// Wait skipped
+	tstr = Bus::read8(OCPM_BASE + 0x00);
+	Bus::write8(OCPM_BASE + 0x00, tstr & 0xF7);
+	ocpm_write8(0x24, 0xF8);
+}
+static void hle_printer_motor_setup()
+{
+	ocpm_write8(0x22, 0xC1);
+	ocpm_write16(0x26, 0x0000);
+	ocpm_write8(0x8A, 0x0F);
 
+	// FUN_0000115C: write 0x0C058006 = 4, read 0x0C05D030, shift right 4, mask 7.
+	Bus::write16(0x0C058006, 0x0004);
+	uint16_t loop30 = Bus::read16(0x0C05D030);
+	uint16_t ret = (loop30 >> 4) & 7;
+
+	if (ret == 0)
+	{
+		hle_fun_1b76_side_effects(0x0064, 0x01);
+	}
+	else
+	{
+		uint16_t v = Bus::read16(0x0C05D030);
+		Bus::write16(0x0C05D030, v | 0x0100);
+
+		hle_fun_1b76_side_effects(0x021C, 0x01);
+		hle_fun_1b76_side_effects(0x0212, 0xFF);
+
+		v = Bus::read16(0x0C05D030);
+		Bus::write16(0x0C05D030, v & 0xFEFF);
+	}
+
+	Bus::write16(0x0C05D042, 0x5A50);
+	ocpm_write16(0x26, 0x0000);
+	ocpm_write8(0x8A, 0x00);
+
+	// Final SR: I3-I0 = 0xF
+	sh2.sr = (sh2.sr & 0xFF0F) | 0x00F0;
+}
 void fast_boot()
 {
 	//The BIOS addresses on-chip registers through GBR; keep it identical.
@@ -90,10 +138,10 @@ void fast_boot()
 	//---- 1. Pin function controller (PFC) ----
 	//The BIOS issues 32-bit writes that cover two adjacent 16-bit port control
 	//registers; they are split here because the PFC model is 16-bit.
-	ocpm_write16(0xC8, 0x0C02);   //PACR low half
-	ocpm_write16(0xCA, 0xBF99);   //PACR high half
-	ocpm_write16(0xCC, 0x0080);   //PBCR low half
-	ocpm_write16(0xCE, 0x1000);   //PBCR high half
+	ocpm_write16(0xC8, 0x0C02);   //PACR1
+	ocpm_write16(0xCA, 0xBF99);   //PACR2
+	ocpm_write16(0xCC, 0x0080);   //PBCR1
+	ocpm_write16(0xCE, 0x1000);   //PBCR2
 	ocpm_write16(0xC0, 0x0000);   //PADR
 	ocpm_write16(0xC2, 0x0014);   //PBDR
 	ocpm_write16(0xC4, 0x0400);   //PAIOR
@@ -140,7 +188,7 @@ void fast_boot()
 	if ((Bus::read16(0x05FFFFC0) & 0x0800) != 0) vdp_ctrl |= 0x04;
 	Bus::write16(0x0C058000, vdp_ctrl);
 	Bus::write16(0x0C05C000, 0xFFC0);
-	ocpm_write16(0xC8, 0x1D02);   //PACR low half updated by the BIOS later
+	ocpm_write16(0xC8, 0x1D02);   //PACR1 updated by the BIOS later
 	Bus::write16(0x0C05D020, 0x0001);
 	Bus::write16(0x0C060000, 0x0002);
 
@@ -159,9 +207,9 @@ void fast_boot()
 	}
 	dma_fill16(0x0C051000, 0x0100);             //Palette region
 	dma_fill16(0x09000000, 0x10000);            //Work RAM bank 0
-	dma_fill16(0x09200000, 0x10000);            //Work RAM bank 1
-	dma_fill16(0x09400000, 0x10000);            //Work RAM bank 2
-	dma_fill16(0x09600000, 0x10000);            //Work RAM bank 3
+	dma_fill16(0x09020000, 0x10000);			    //Work RAM bank 1
+	dma_fill16(0x09040000, 0x10000);            //Work RAM bank 2
+	dma_fill16(0x09060000, 0x10000);            //Work RAM bank 3
 	dma_fill16(0x0F000000, 0x0200);             //On-chip object/expansion RAM
 
 	//---- 6. DMA shutdown ----
@@ -170,6 +218,9 @@ void fast_boot()
 
 	//---- 7. BIOS io_setup(1) ----
 	hle_io_setup(1);
+
+	//---- 8. Printer motor / paper positioning setup (FUN_00001C2C) ----
+	hle_printer_motor_setup();
 
 	//The remaining BIOS steps are mechanical/blocking and need no emulation:
 	//  - paper-positioning via the printer motor (0x1C2C),
